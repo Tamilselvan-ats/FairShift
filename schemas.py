@@ -1,19 +1,21 @@
-"""FairShift - Pydantic Schemas for Deterministic AI Outputs.
+"""FairShift - Strict Pydantic Schemas for Deterministic AI Outputs.
 
-Defines strict models used as Gemini response_schemas to guarantee
-deterministic JSON parsing and type-safety across the application.
+Defines BaseModel classes used as Gemini response_schemas with custom
+field validators to guarantee deterministic JSON parsing, type safety,
+and data normalization across the entire application.
 """
 
-from typing import List, Literal
-from pydantic import BaseModel, Field
+from typing import List, Literal, Optional
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 
 class SafetyFeedbackReport(BaseModel):
-    """Structured report extracted from multilingual worker safety/feedback submissions."""
+    """Structured safety report extracted from multilingual worker voice/text submissions."""
 
     translated_summary: str = Field(
         ...,
         description="Clear, plain English translation and concise summary of the worker's report.",
+        min_length=3,
     )
     anonymized_report: str = Field(
         ...,
@@ -22,14 +24,15 @@ class SafetyFeedbackReport(BaseModel):
             "specific worker IDs, supervisor identities) completely removed or replaced with neutral roles "
             "(e.g., 'Worker A', 'Site Supervisor') to prevent retaliation."
         ),
+        min_length=3,
     )
     urgency_level: Literal["routine", "see_soon", "urgent"] = Field(
         ...,
-        description="Severity classification: 'routine' for normal updates/minor requests, 'see_soon' for moderate concerns needing attention, 'urgent' for immediate safety risks or severe violations.",
+        description="Severity classification: 'routine' (minor), 'see_soon' (needs attention <24h), 'urgent' (critical life-safety).",
     )
     red_flags: List[str] = Field(
         default_factory=list,
-        description="Specific safety hazards or labor rights violations strictly extracted from the input text. Never hallucinate or invent flags.",
+        description="Specific safety hazards or labor rights violations strictly extracted from the input text. Never hallucinated or invented.",
     )
     fatigue_warning: bool = Field(
         ...,
@@ -49,12 +52,50 @@ class SafetyFeedbackReport(BaseModel):
     )
     attrition_risk: Literal["low", "medium", "high"] = Field(
         default="low",
-        description="Assessed risk of the worker quitting, walking off the job, or burnout.",
+        description="Assessed risk of the worker quitting, walking off the job, or experiencing burnout.",
     )
     actionable_recommendations: List[str] = Field(
         default_factory=list,
         description="Concrete, practical safety or administrative actions management must take.",
     )
+
+    @field_validator("urgency_level", mode="before")
+    @classmethod
+    def normalize_urgency_input(cls, v: str) -> str:
+        """Normalize case and whitespace for urgency level."""
+        if not v:
+            return "routine"
+        cleaned = str(v).strip().lower()
+        if any(term in cleaned for term in ["urgent", "critical", "danger", "emergency", "red", "immediate"]):
+            return "urgent"
+        elif any(term in cleaned for term in ["see_soon", "warning", "caution", "soon", "moderate", "yellow"]):
+            return "see_soon"
+        return "routine"
+
+    @field_validator("confidence", mode="before")
+    @classmethod
+    def normalize_confidence(cls, v: str) -> str:
+        """Normalize confidence level to standard literals."""
+        if not v:
+            return "medium"
+        cleaned = str(v).strip().lower()
+        if cleaned in ["low", "medium", "high"]:
+            return cleaned
+        return "medium"
+
+    @field_validator("red_flags", mode="before")
+    @classmethod
+    def sanitize_red_flags(cls, v: Optional[List[str]]) -> List[str]:
+        """Deduplicate and strip whitespace from red flag entries."""
+        if not v:
+            return []
+        cleaned_flags = []
+        for item in v:
+            if item and isinstance(item, str):
+                s = item.strip()
+                if s and s not in cleaned_flags:
+                    cleaned_flags.append(s)
+        return cleaned_flags
 
 
 class ShiftScanReport(BaseModel):
@@ -76,7 +117,7 @@ class ShiftScanReport(BaseModel):
     standard_hours: float = Field(
         ...,
         ge=0.0,
-        description="Regular non-overtime hours (typically up to 8 hours/day or standard baseline).",
+        description="Regular non-overtime hours (typically up to 8.0 hours/day).",
     )
     overtime_hours: float = Field(
         ...,
@@ -111,23 +152,23 @@ class ShiftScanReport(BaseModel):
     reported_pay: float = Field(
         ...,
         ge=0.0,
-        description="Actual pay or cash compensation the worker received or was told they would receive.",
+        description="Actual pay or cash compensation the worker received or was promised.",
     )
     wage_shortfall: float = Field(
         ...,
-        description="Difference between fair expected pay and reported pay. Positive indicates wage underpayment/theft.",
+        description="Difference between fair expected pay and reported pay. Positive indicates underpayment/wage theft.",
     )
     fatigue_alert: bool = Field(
         ...,
-        description="True if shift duration or frequency exceeds safe physiological limits (e.g. >10h/shift or continuous night shifts).",
+        description="True if shift duration or frequency exceeds safe physiological limits (e.g. >9h/shift).",
     )
     fatigue_level: Literal["normal", "warning", "critical"] = Field(
         default="normal",
-        description="Fatigue severity: 'normal' (<=8h), 'warning' (8.5-12h), 'critical' (>12h or sleepless double shifts).",
+        description="Fatigue severity: 'normal' (<=8h), 'warning' (8.5-12h), 'critical' (>12h).",
     )
     fatigue_reason: str = Field(
         default="",
-        description="Detailed medical/ergonomic explanation of fatigue danger and mandated rest duration.",
+        description="Detailed ergonomic/medical explanation of fatigue danger and mandated rest duration.",
     )
     anomalies: List[str] = Field(
         default_factory=list,
@@ -137,3 +178,21 @@ class ShiftScanReport(BaseModel):
         default="General",
         description="The workplace sector identified from the timesheet.",
     )
+
+    @model_validator(mode="after")
+    def validate_payroll_consistency(self) -> "ShiftScanReport":
+        """Verify mathematical relationships and guarantee non-negative wage shortfall."""
+        # Ensure total hours equals standard + overtime
+        calculated_total = round(self.standard_hours + self.overtime_hours, 2)
+        if abs(self.total_hours_worked - calculated_total) > 0.1:
+            self.total_hours_worked = calculated_total
+
+        # Ensure expected pay is sum of standard and overtime
+        expected_sum = round(self.expected_standard_pay + self.expected_overtime_pay, 2)
+        if abs(self.total_expected_fair_pay - expected_sum) > 0.1:
+            self.total_expected_fair_pay = expected_sum
+
+        # Calculate wage shortfall accurately
+        shortfall = round(max(0.0, self.total_expected_fair_pay - self.reported_pay), 2)
+        self.wage_shortfall = shortfall
+        return self

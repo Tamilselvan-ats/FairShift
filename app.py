@@ -1,24 +1,48 @@
 """FairShift - Decent Work Platform (UN SDG 8).
 
 A production-ready Streamlit application empowering manual workforces
-(construction workers, campus custodial/facility staff) and employers
+(construction crews, campus custodial/facility staff) and employers
 with multilingual safety reporting, anonymization, timesheet auditing,
 fair pay calculation, and workforce analytics.
 """
 
+from __future__ import annotations
+
 import datetime
+import json
 import os
+from typing import Dict, Any, List, Optional
 import pandas as pd
 import streamlit as st
 from dotenv import load_dotenv
 
+from config import (
+    APP_NAME,
+    APP_SUBTITLE,
+    APP_VERSION,
+    UN_SDG_TARGET,
+    SECTOR_CONSTRUCTION,
+    SECTOR_COLLEGE,
+    SECTOR_GENERAL,
+    PRIMARY_MODEL,
+    STANDARD_DAILY_HOURS_LIMIT,
+    STATUTORY_OVERTIME_MULTIPLIER,
+    COLOR_URGENT_BG,
+    COLOR_URGENT_BORDER,
+    COLOR_URGENT_TEXT,
+    COLOR_WARNING_BG,
+    COLOR_WARNING_BORDER,
+    COLOR_WARNING_TEXT,
+    COLOR_ROUTINE_BG,
+    COLOR_ROUTINE_BORDER,
+    COLOR_ROUTINE_TEXT,
+)
 from schemas import SafetyFeedbackReport, ShiftScanReport
 from pay_calculator import calculate_fair_pay, assess_fatigue_level, normalize_urgency
 from ai_service import (
     analyze_safety_feedback,
     analyze_timesheet_data,
     get_gemini_client,
-    PRIMARY_MODEL,
 )
 from sample_data import (
     PRESET_SAFETY_ROUTINE,
@@ -34,9 +58,9 @@ from sample_data import (
 # Load environment variables safely
 load_dotenv()
 
-# Page configuration
+# Streamlit Page Configuration
 st.set_page_config(
-    page_title="FairShift | Decent Work Platform",
+    page_title=f"{APP_NAME} | {APP_SUBTITLE}",
     page_icon="🛡️",
     layout="wide",
     initial_sidebar_state="expanded",
@@ -63,14 +87,16 @@ if "last_shift_analysis" not in st.session_state:
 
 
 # =====================================================================
-# ACCESSIBILITY & STYLING (WCAG High Contrast & Mobile Touch Friendly)
+# ACCESSIBILITY & STYLING (WCAG 2.1 High Contrast & Touch Targets)
 # =====================================================================
-def inject_custom_css(high_contrast: bool = False):
-    """Inject custom CSS for high contrast readability and mobile ergonomics."""
+def inject_custom_css(high_contrast: bool = False) -> None:
+    """Inject custom CSS for high contrast readability and mobile ergonomics.
+
+    Args:
+        high_contrast: If True, applies enlarged typography and high-contrast borders.
+    """
     font_size = "18px" if high_contrast else "16px"
     border_width = "3px" if high_contrast else "1px"
-    bg_contrast = "#0f172a" if high_contrast else "transparent"
-    text_contrast = "#f8fafc" if high_contrast else "inherit"
 
     css = f"""
     <style>
@@ -85,43 +111,34 @@ def inject_custom_css(high_contrast: bool = False):
         padding: 0.5rem 1rem;
         transition: all 0.2s ease-in-out;
     }}
-    .preset-btn {{
-        background-color: #f1f5f9;
-        border: 2px solid #cbd5e1;
-        border-radius: 8px;
-        padding: 8px 12px;
-        font-weight: 600;
-        cursor: pointer;
-    }}
     /* High visual impact alert banners */
     .banner-urgent {{
-        background-color: #fee2e2;
-        color: #991b1b;
-        border: 3px solid #dc2626;
+        background-color: {COLOR_URGENT_BG};
+        color: {COLOR_URGENT_TEXT};
+        border: 3px solid {COLOR_URGENT_BORDER};
         border-radius: 10px;
         padding: 16px 20px;
         margin-bottom: 20px;
         box-shadow: 0 4px 6px -1px rgba(220, 38, 38, 0.2);
     }}
     .banner-warning {{
-        background-color: #fef3c7;
-        color: #92400e;
-        border: 3px solid #d97706;
+        background-color: {COLOR_WARNING_BG};
+        color: {COLOR_WARNING_TEXT};
+        border: 3px solid {COLOR_WARNING_BORDER};
         border-radius: 10px;
         padding: 16px 20px;
         margin-bottom: 20px;
         box-shadow: 0 4px 6px -1px rgba(217, 119, 6, 0.2);
     }}
     .banner-routine {{
-        background-color: #dcfce7;
-        color: #166534;
-        border: 3px solid #16a34a;
+        background-color: {COLOR_ROUTINE_BG};
+        color: {COLOR_ROUTINE_TEXT};
+        border: 3px solid {COLOR_ROUTINE_BORDER};
         border-radius: 10px;
         padding: 16px 20px;
         margin-bottom: 20px;
         box-shadow: 0 4px 6px -1px rgba(22, 163, 74, 0.2);
     }}
-    /* Card layouts */
     .report-card {{
         background: #ffffff;
         border: {border_width} solid #e2e8f0;
@@ -130,29 +147,57 @@ def inject_custom_css(high_contrast: bool = False):
         margin-bottom: 16px;
         box-shadow: 0 1px 3px rgba(0,0,0,0.08);
     }}
-    .tag-badge {{
-        display: inline-block;
-        padding: 4px 10px;
-        border-radius: 9999px;
-        font-size: 13px;
-        font-weight: 700;
-        margin-right: 6px;
-    }}
-    .tag-urgent {{ background: #dc2626; color: white; }}
-    .tag-warning {{ background: #f59e0b; color: white; }}
-    .tag-routine {{ background: #10b981; color: white; }}
-    .tag-neutral {{ background: #64748b; color: white; }}
     </style>
     """
     st.markdown(css, unsafe_allow_html=True)
+
+
+def render_audio_readout_widget(text_content: str, label: str = "🔊 Read Out Aloud (Audio Playback)") -> None:
+    """Render a simulated browser Web Speech audio readout button for low-literacy users.
+
+    Args:
+        text_content: The text to be spoken aloud.
+        label: Button display text.
+    """
+    clean_text = text_content.replace('"', '\\"').replace("\n", " ")
+    audio_html = f"""
+    <div style="margin-top: 10px; margin-bottom: 10px;">
+        <button onclick="
+            if ('speechSynthesis' in window) {{
+                window.speechSynthesis.cancel();
+                const utterance = new SpeechSynthesisUtterance('{clean_text}');
+                utterance.rate = 0.95;
+                window.speechSynthesis.speak(utterance);
+            }} else {{
+                alert('Audio readout is supported on all modern mobile and desktop browsers.');
+            }}
+        " style="
+            background: #2563eb;
+            color: #ffffff;
+            border: none;
+            border-radius: 6px;
+            padding: 8px 14px;
+            font-size: 14px;
+            font-weight: 600;
+            cursor: pointer;
+            display: inline-flex;
+            align-items: center;
+            gap: 6px;
+        ">
+            {label}
+        </button>
+    </div>
+    """
+    st.markdown(audio_html, unsafe_allow_html=True)
 
 
 # =====================================================================
 # SIDEBAR NAVIGATION & SETTINGS
 # =====================================================================
 with st.sidebar:
-    st.markdown("### 🛡️ **FairShift Platform**")
-    st.caption("Decent Work & Economic Growth • UN SDG 8")
+    st.markdown(f"### 🛡️ **{APP_NAME}**")
+    st.caption(f"{APP_SUBTITLE} • v{APP_VERSION}")
+    st.caption(f"_{UN_SDG_TARGET}_")
     st.divider()
 
     # Primary View Toggle
@@ -168,11 +213,11 @@ with st.sidebar:
         "Industry Sector:",
         options=[
             "All Sectors / Cross-Industry",
-            "Construction Sites",
-            "College Support & Facility Staff",
+            SECTOR_CONSTRUCTION,
+            SECTOR_COLLEGE,
         ],
         index=0,
-        help="Demonstrating targeted safety, ergonomic, and wage policies for manual workforces.",
+        help="Demonstrates targeted safety, ergonomic, and wage policies for manual workforces.",
     )
 
     st.divider()
@@ -181,16 +226,12 @@ with st.sidebar:
     inject_custom_css(high_contrast=high_contrast)
 
     st.divider()
-    # API Key Health Check
+    # API Key & Engine Health Status
     api_key_env = os.getenv("GEMINI_API_KEY")
     if api_key_env:
-        st.success("🟢 Gemini 2.5 Flash API Connected", icon="✅")
+        st.success(f"🟢 Gemini API Connected (`{PRIMARY_MODEL}`)", icon="✅")
     else:
-        st.error(
-            "🔴 Missing GEMINI_API_KEY environment variable. "
-            "Please configure GEMINI_API_KEY in your deployment environment.",
-            icon="⚠️",
-        )
+        st.info("ℹ️ Offline Heuristic Engine Active (Deterministic Fallback Mode)", icon="🛡️")
 
     st.caption("Powered by Google Gemini & Pydantic")
 
@@ -198,19 +239,21 @@ with st.sidebar:
 # =====================================================================
 # INTERFACE 1: WORKER PORTAL
 # =====================================================================
-def render_worker_portal(active_sector: str):
-    """Render Interface 1: Mobile-friendly worker portal with high visual cues."""
+def render_worker_portal(active_sector: str) -> None:
+    """Render Interface 1: Mobile-friendly worker portal with high visual cues.
+
+    Args:
+        active_sector: Currently active sector filter.
+    """
     st.title("👷 Worker SafeSpace & FairPay Portal")
     st.markdown(
         "**Confidential, multilingual voice/text reporting & timesheet verification.** "
         "Your identity is automatically protected by the AI Retaliation Shield."
     )
 
-    # Sector context badge
-    sector_label = "General Manual Workforce" if active_sector.startswith("All") else active_sector
+    sector_label = SECTOR_GENERAL if active_sector.startswith("All") else active_sector
     st.info(f"📍 Active Workplace Context: **{sector_label}** | 🔒 **100% Anonymous & Retaliation-Proof**")
 
-    # Dual features via accessible tabs
     tab_safety, tab_shift = st.tabs([
         "🗣️ Multilingual Safety & Feedback Reporter",
         "⏱️ Shift & Payslip Scanner",
@@ -226,14 +269,13 @@ def render_worker_portal(active_sector: str):
             "Gemini translates it, extracts urgent safety hazards, and strips away all identifying names."
         )
 
-        # UI REQUIREMENT: 3 Quick Preset buttons for fast 1-click live demo testing
         st.markdown("**⚡ Quick Demo Presets (1-Click Load):**")
         preset_cols = st.columns(3)
 
         preset_sector = (
-            "Construction Sites"
+            SECTOR_CONSTRUCTION
             if "Construction" in active_sector
-            else ("College Support & Facility Staff" if "College" in active_sector else "Construction Sites")
+            else (SECTOR_COLLEGE if "College" in active_sector else SECTOR_CONSTRUCTION)
         )
 
         with preset_cols[0]:
@@ -254,7 +296,6 @@ def render_worker_portal(active_sector: str):
                 st.session_state.last_safety_analysis = None
                 st.rerun()
 
-        # Text input area simulating voice/dialect transcription
         user_report_text = st.text_area(
             "Worker Voice Transcription / Message:",
             value=st.session_state.active_safety_input,
@@ -284,7 +325,7 @@ def render_worker_portal(active_sector: str):
                         st.session_state.last_safety_analysis = analysis_data
                         st.session_state.active_safety_input = user_report_text
                     except Exception as err:
-                        st.error(f"Error processing report with Gemini API: {err}")
+                        st.error(f"Error processing report: {err}")
 
         # DISPLAY RESULTS WITH PROMINENT VISUAL BANNERS
         res = st.session_state.last_safety_analysis
@@ -292,7 +333,6 @@ def render_worker_portal(active_sector: str):
             st.divider()
             urgency = res.get("urgency_level", "routine")
 
-            # Visual Banner Requirement (Red for urgent hazards, Yellow for warnings, Green for routine)
             if urgency == "urgent":
                 st.markdown(
                     """
@@ -331,13 +371,17 @@ def render_worker_portal(active_sector: str):
                     unsafe_allow_html=True,
                 )
 
-            # Detail Cards
+            # Details
             c1, c2 = st.columns(2)
 
             with c1:
                 st.markdown("#### 🌐 **English Translation & Summary**")
                 st.info(f"**Detected Dialect/Language:** `{res.get('detected_language', 'Auto-detected')}`")
-                st.write(res.get("translated_summary", "No summary generated."))
+                summary_text = res.get("translated_summary", "No summary generated.")
+                st.write(summary_text)
+
+                # Low-literacy accessibility audio button
+                render_audio_readout_widget(summary_text, label="🔊 Listen to Summary (Audio Readout)")
 
                 st.markdown("#### 🛡️ **Anonymized Retaliation-Proof Report**")
                 st.caption("All personal names, supervisor references, and phone numbers replaced with neutral roles:")
@@ -366,7 +410,6 @@ def render_worker_portal(active_sector: str):
                 else:
                     st.write("- Routine site monitoring recommended.")
 
-            # Submission button into Admin queue
             st.markdown("---")
             if st.button("🚀 Submit to Admin Escalation Queue", type="primary", use_container_width=True):
                 new_entry = {
@@ -385,7 +428,7 @@ def render_worker_portal(active_sector: str):
                     "actionable_recommendations": res.get("actionable_recommendations", []),
                 }
                 st.session_state.safety_reports.insert(0, new_entry)
-                st.success("✅ Report securely sent to Admin Escalation Queue! (Your identity remains 100% confidential).")
+                st.success("✅ Report securely sent to Admin Escalation Queue! (Identity 100% confidential).")
 
     # -----------------------------------------------------------------
     # FEATURE 2: SHIFT & PAYSLIP SCANNER
@@ -418,7 +461,6 @@ def render_worker_portal(active_sector: str):
                 st.session_state.last_shift_analysis = None
                 st.rerun()
 
-        # Optional file uploader
         uploaded_file = st.file_uploader(
             "Upload Timesheet Document (.txt, .csv, log):",
             type=["txt", "csv", "log"],
@@ -469,7 +511,6 @@ def render_worker_portal(active_sector: str):
             fatigue_alert = sres.get("fatigue_alert", False)
             fatigue_level = sres.get("fatigue_level", "normal")
 
-            # Prominent visual banner for payroll & fatigue
             if shortfall > 0 or fatigue_level == "critical":
                 st.markdown(
                     f"""
@@ -508,7 +549,6 @@ def render_worker_portal(active_sector: str):
                     unsafe_allow_html=True,
                 )
 
-            # Numerical KPI Metrics
             mcol1, mcol2, mcol3, mcol4 = st.columns(4)
             with mcol1:
                 st.metric(
@@ -537,7 +577,6 @@ def render_worker_portal(active_sector: str):
                     delta_color="inverse" if shortfall > 0 else "normal",
                 )
 
-            # Details
             sc1, sc2 = st.columns(2)
             with sc1:
                 st.markdown("#### ⚖️ **Fair Labor Pay Breakdown**")
@@ -548,7 +587,9 @@ def render_worker_portal(active_sector: str):
 
             with sc2:
                 st.markdown("#### 💤 **Fatigue & Rest Requirements**")
-                st.info(sres.get("fatigue_reason", "Shift completed safely."))
+                fatigue_desc = sres.get("fatigue_reason", "Shift completed safely.")
+                st.info(fatigue_desc)
+                render_audio_readout_widget(fatigue_desc, label="🔊 Listen to Health Notice")
 
                 st.markdown("#### ⚠️ **Flagged Anomalies**")
                 anomalies = sres.get("anomalies", [])
@@ -558,7 +599,6 @@ def render_worker_portal(active_sector: str):
                 else:
                     st.write("- 🟢 *No labor anomalies identified.*")
 
-            # Save to records button
             st.markdown("---")
             if st.button("📥 Log Shift Record to Admin Database", type="primary", use_container_width=True):
                 new_shift = {
@@ -588,15 +628,18 @@ def render_worker_portal(active_sector: str):
 # =====================================================================
 # INTERFACE 2: ADMIN DASHBOARD (WORKFORCE ANALYTICS & ESCALATION)
 # =====================================================================
-def render_admin_dashboard(active_sector: str):
-    """Render Interface 2: Desktop-friendly workforce analytics and escalation dashboard."""
+def render_admin_dashboard(active_sector: str) -> None:
+    """Render Interface 2: Desktop-friendly workforce analytics and escalation dashboard.
+
+    Args:
+        active_sector: Currently active sector filter.
+    """
     st.title("📊 Workforce Analytics & Escalation Command")
     st.markdown(
         "**Real-time monitoring of anonymized worker safety reports, fatigue spikes, and wage shortfalls.** "
-        "Enforcing UN SDG 8 Decent Work compliance across facilities and job sites."
+        f"Enforcing _{UN_SDG_TARGET}_ across facilities and job sites."
     )
 
-    # Filter data based on selected sector
     all_reports = st.session_state.safety_reports
     all_shifts = st.session_state.shift_records
 
@@ -607,7 +650,6 @@ def render_admin_dashboard(active_sector: str):
         filtered_reports = all_reports
         filtered_shifts = all_shifts
 
-    # KPI METRIC BANNER
     total_reports_count = len(filtered_reports)
     urgent_count = sum(1 for r in filtered_reports if r.get("urgency_level") == "urgent")
     fatigue_count = sum(1 for r in filtered_reports if r.get("fatigue_warning")) + sum(
@@ -633,7 +675,6 @@ def render_admin_dashboard(active_sector: str):
 
     st.divider()
 
-    # ANALYTICS CHARTS SECTION
     st.subheader("📈 Workforce Safety & Labor Health Heatmap")
     chart_c1, chart_c2 = st.columns(2)
 
@@ -645,7 +686,7 @@ def render_admin_dashboard(active_sector: str):
             "Routine Status": sum(1 for r in filtered_reports if r.get("urgency_level") == "routine"),
         }
         df_urgency = pd.DataFrame(list(urgency_counts.items()), columns=["Severity", "Count"]).set_index("Severity")
-        st.bar_chart(df_urgency, color="#dc2626")
+        st.bar_chart(df_urgency, color=COLOR_URGENT_BORDER)
 
     with chart_c2:
         st.markdown("**Shift Fatigue Distribution**")
@@ -655,11 +696,10 @@ def render_admin_dashboard(active_sector: str):
             "Normal (<=8h)": sum(1 for s in filtered_shifts if s.get("fatigue_level") == "normal"),
         }
         df_fatigue = pd.DataFrame(list(fatigue_tiers.items()), columns=["Fatigue Level", "Shifts"]).set_index("Fatigue Level")
-        st.bar_chart(df_fatigue, color="#f59e0b")
+        st.bar_chart(df_fatigue, color=COLOR_WARNING_BORDER)
 
     st.divider()
 
-    # ESCALATION ACTION CENTER
     st.subheader("🚨 Incident Escalation Queue & Remediation Tracker")
     st.caption("Inspect anonymized worker testimony, track OSHA/labor violations, and dispatch remediation.")
 
@@ -669,7 +709,7 @@ def render_admin_dashboard(active_sector: str):
         for idx, report in enumerate(filtered_reports):
             urgency = report.get("urgency_level", "routine")
             urgency_icon = "🔴" if urgency == "urgent" else ("🟡" if urgency == "see_soon" else "🟢")
-            sector = report.get("sector", "General")
+            sector = report.get("sector", SECTOR_GENERAL)
 
             expander_title = (
                 f"{urgency_icon} [{report.get('id', 'FS')}] {sector} — "
@@ -703,7 +743,6 @@ def render_admin_dashboard(active_sector: str):
                     st.write(f"**Quit / Attrition Risk:** `{report.get('attrition_risk', 'low').upper()}`")
                     st.write(f"**Current Status:** `{report.get('status', 'Pending')}`")
 
-                    # Escalation Actions
                     st.markdown("**Escalation Dispatch:**")
                     btn_col1, btn_col2 = st.columns(2)
                     with btn_col1:
@@ -719,7 +758,6 @@ def render_admin_dashboard(active_sector: str):
 
     st.divider()
 
-    # PAYROLL AUDIT & WAGE RESTITUTION TABLE
     st.subheader("💵 Shift & Payroll Audit Log")
     st.caption("Verifying standard hours, 1.5x statutory overtime rates, and wage restitution.")
 
@@ -741,14 +779,25 @@ def render_admin_dashboard(active_sector: str):
         df_shifts = pd.DataFrame(table_rows)
         st.dataframe(df_shifts, use_container_width=True)
 
-        # Download button for audit compliance
-        csv_data = df_shifts.to_csv(index=False).encode("utf-8")
-        st.download_button(
-            label="📥 Export Wage Remediation Audit (CSV)",
-            data=csv_data,
-            file_name="fairshift_payroll_audit.csv",
-            mime="text/csv",
-        )
+        exp_col1, exp_col2 = st.columns(2)
+        with exp_col1:
+            csv_data = df_shifts.to_csv(index=False).encode("utf-8")
+            st.download_button(
+                label="📥 Export Wage Remediation Audit (CSV)",
+                data=csv_data,
+                file_name="fairshift_payroll_audit.csv",
+                mime="text/csv",
+                use_container_width=True,
+            )
+        with exp_col2:
+            json_data = json.dumps(filtered_shifts, indent=2).encode("utf-8")
+            st.download_button(
+                label="📥 Export Full Audit Log (JSON)",
+                data=json_data,
+                file_name="fairshift_audit_log.json",
+                mime="application/json",
+                use_container_width=True,
+            )
     else:
         st.info("No shift records matching current sector filter.")
 
@@ -756,8 +805,8 @@ def render_admin_dashboard(active_sector: str):
 # =====================================================================
 # MAIN ROUTING
 # =====================================================================
-def main():
-    """Main application routing based on sidebar selection."""
+def main() -> None:
+    """Main application entrypoint routing based on sidebar selection."""
     if "Worker Portal" in current_view:
         render_worker_portal(selected_sector)
     else:
